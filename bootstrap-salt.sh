@@ -238,7 +238,11 @@ _ECHO_DEBUG=${BS_ECHO_DEBUG:-$BS_FALSE}
 _CONFIG_ONLY=$BS_FALSE
 _PIP_ALLOWED=${BS_PIP_ALLOWED:-$BS_FALSE}
 _PIP_ALL=${BS_PIP_ALL:-$BS_FALSE}
-_SALT_ETC_DIR=${BS_SALT_ETC_DIR:-/etc/salt}
+if uname -a | grep FreeBSD > /dev/null; then
+    _SALT_ETC_DIR=${BS_SALT_ETC_DIR:-/usr/local/etc/salt}
+else
+    _SALT_ETC_DIR=${BS_SALT_ETC_DIR:-/etc/salt}
+fi
 _SALT_CACHE_DIR=${BS_SALT_CACHE_DIR:-/var/cache/salt}
 _PKI_DIR=${_SALT_ETC_DIR}/pki
 _FORCE_OVERWRITE=${BS_FORCE_OVERWRITE:-$BS_FALSE}
@@ -5268,113 +5272,22 @@ __freebsd_get_packagesite() {
 
 # Using a separate conf step to head for idempotent install...
 __configure_freebsd_pkg_details() {
-    ## pkg.conf is deprecated.
-    ## We use conf files in /usr/local or /etc instead
-    mkdir -p /usr/local/etc/pkg/repos/
-    mkdir -p /etc/pkg/
-
-    ## Use new JSON-like format for pkg repo configs
-    ## check if /etc/pkg/FreeBSD.conf is already in place
-    if [ ! -f /etc/pkg/FreeBSD.conf ]; then
-      conf_file=/usr/local/etc/pkg/repos/freebsd.conf
-      {
-          echo "FreeBSD:{"
-          echo "    url: \"${PKGCONFURL}\","
-          echo "    mirror_type: \"srv\","
-          echo "    signature_type: \"fingerprints\","
-          echo "    fingerprints: \"/usr/share/keys/pkg\","
-          echo "    enabled: true"
-          echo "}"
-      } > $conf_file
-      __copyfile $conf_file /etc/pkg/FreeBSD.conf
-    fi
-    FROM_FREEBSD="-r FreeBSD"
-
-    ##### Workaround : Waiting for SaltStack Repository to be available for FreeBSD 12 ####
-    if [ "${DISTRO_MAJOR_VERSION}" -ne 12 ]; then
-        ## add saltstack freebsd repo
-        salt_conf_file=/usr/local/etc/pkg/repos/saltstack.conf
-        {
-            echo "SaltStack:{"
-            echo "    url: \"${SALTPKGCONFURL}\","
-            echo "    mirror_type: \"http\","
-            echo "    enabled: true"
-            echo "    priority: 10"
-            echo "}"
-        } > $salt_conf_file
-        FROM_SALTSTACK="-r SaltStack"
-    fi
-    ##### End Workaround : Waiting for SaltStack Repository to be available for FreeBSD 12 ####
-
-    ## ensure future ports builds use pkgng
-    echo "WITH_PKGNG=   yes" >> /etc/make.conf
-
-    /usr/local/sbin/pkg update -f || return 1
+    echo 'not hijacking pkg repo configurations'
 }
 
-install_freebsd_9_stable_deps() {
-    _SALT_ETC_DIR=${BS_SALT_ETC_DIR:-/usr/local/etc/salt}
-    _PKI_DIR=${_SALT_ETC_DIR}/pki
-
-    if [ $_DISABLE_REPOS -eq $BS_FALSE ]; then
-        #make variables available even if pkg already installed
-        __freebsd_get_packagesite
-
-        if [ ! -x /usr/local/sbin/pkg ]; then
-
-            # install new `pkg` code from its own tarball.
-            fetch "${_PACKAGESITE}/Latest/pkg.txz" || return 1
-            tar xf ./pkg.txz -s ",/.*/,,g" "*/pkg-static" || return 1
-            ./pkg-static add ./pkg.txz || return 1
-            /usr/local/sbin/pkg2ng || return 1
-        fi
-
-        # Configure the pkg repository using new approach
-        __configure_freebsd_pkg_details || return 1
-    fi
-
-    # Now install swig30
-    # shellcheck disable=SC2086
-    /usr/local/sbin/pkg install ${FROM_FREEBSD} -y swig30 || return 1
-
-    # YAML module is used for generating custom master/minion configs
-    # shellcheck disable=SC2086
-    /usr/local/sbin/pkg install ${FROM_FREEBSD} -y py27-yaml || return 1
-
-    if [ "${_EXTRA_PACKAGES}" != "" ]; then
-        echoinfo "Installing the following extra packages as requested: ${_EXTRA_PACKAGES}"
-        # shellcheck disable=SC2086
-        /usr/local/sbin/pkg install ${FROM_FREEBSD} -y ${_EXTRA_PACKAGES} || return 1
-    fi
-
-    if [ "$_UPGRADE_SYS" -eq $BS_TRUE ]; then
-        pkg upgrade -y || return 1
-    fi
-
-    return 0
-}
-
-install_freebsd_10_stable_deps() {
-    install_freebsd_9_stable_deps
-}
-
-install_freebsd_11_stable_deps() {
-    install_freebsd_9_stable_deps
-}
-
-install_freebsd_12_stable_deps() {
-    install_freebsd_9_stable_deps
+install_freebsd_deps() {
+    pkg install -y pkg
 }
 
 install_freebsd_git_deps() {
     install_freebsd_9_stable_deps || return 1
 
     # shellcheck disable=SC2086
-    SALT_DEPENDENCIES=$(/usr/local/sbin/pkg search ${FROM_FREEBSD} -R -d sysutils/py-salt | grep -i origin | sed -e 's/^[[:space:]]*//' | tail -n +2 | awk -F\" '{print $2}' | tr '\n' ' ')
+    SALT_DEPENDENCIES=$(/usr/local/sbin/pkg search -R -d sysutils/py-salt | grep -i origin | sed -e 's/^[[:space:]]*//' | tail -n +2 | awk -F\" '{print $2}' | tr '\n' ' ')
+    SALT_DEPENDENCIES=$(/usr/local/sbin/pkg search -R -d py36-salt | grep 'origin:' \
+        | tail -n +2 | awk -F\" '{print $2}' | sed 's#.*/py-#py36-#g')
     # shellcheck disable=SC2086
-    /usr/local/sbin/pkg install ${FROM_FREEBSD} -y ${SALT_DEPENDENCIES} || return 1
-    # install python meta package
-    /usr/local/sbin/pkg install -y lang/python || return 1
+    /usr/local/sbin/pkg install -y ${SALT_DEPENDENCIES} || return 1
 
     if ! __check_command_exists git; then
         /usr/local/sbin/pkg install -y git || return 1
@@ -5383,14 +5296,6 @@ install_freebsd_git_deps() {
     /usr/local/sbin/pkg install -y www/py-requests || return 1
 
     __git_clone_and_checkout || return 1
-
-    if [ -f "${_SALT_GIT_CHECKOUT_DIR}/requirements/base.txt" ]; then
-        # We're on the develop branch, install whichever tornado is on the requirements file
-        __REQUIRED_TORNADO="$(grep tornado "${_SALT_GIT_CHECKOUT_DIR}/requirements/base.txt")"
-        if [ "${__REQUIRED_TORNADO}" != "" ]; then
-             /usr/local/sbin/pkg install -y www/py-tornado4 || return 1
-        fi
-    fi
 
     echodebug "Adapting paths to FreeBSD"
     # The list of files was taken from Salt's BSD port Makefile
@@ -5430,34 +5335,12 @@ install_freebsd_git_deps() {
     return 0
 }
 
-install_freebsd_9_stable() {
-    # shellcheck disable=SC2086
-    /usr/local/sbin/pkg install ${FROM_SALTSTACK} -y sysutils/py-salt || return 1
-    return 0
-}
-
-install_freebsd_10_stable() {
-    # shellcheck disable=SC2086
-    /usr/local/sbin/pkg install ${FROM_FREEBSD} -y sysutils/py-salt || return 1
-    return 0
-}
-
-install_freebsd_11_stable() {
+install_freebsd_stable() {
 #
 # installing latest version of salt from FreeBSD CURRENT ports repo
 #
     # shellcheck disable=SC2086
-    /usr/local/sbin/pkg install ${FROM_FREEBSD} -y sysutils/py-salt || return 1
-
-    return 0
-}
-
-install_freebsd_12_stable() {
-#
-# installing latest version of salt from FreeBSD CURRENT ports repo
-#
-    # shellcheck disable=SC2086
-    /usr/local/sbin/pkg install ${FROM_FREEBSD} -y sysutils/py-salt || return 1
+    /usr/local/sbin/pkg install -y py36-salt || return 1
 
     return 0
 }
@@ -5499,7 +5382,7 @@ install_freebsd_git() {
     return 0
 }
 
-install_freebsd_9_stable_post() {
+install_freebsd_stable_post() {
     for fname in api master minion syndic; do
         # Skip salt-api since the service should be opt-in and not necessarily started on boot
         [ $fname = "api" ] && continue
@@ -5509,34 +5392,18 @@ install_freebsd_9_stable_post() {
         [ $fname = "master" ] && [ "$_INSTALL_MASTER" -eq $BS_FALSE ] && continue
         [ $fname = "syndic" ] && [ "$_INSTALL_SYNDIC" -eq $BS_FALSE ] && continue
 
-        enable_string="salt_${fname}_enable=\"YES\""
+        enable_string="salt_${fname}_enable=YES"
         grep "$enable_string" /etc/rc.conf >/dev/null 2>&1
-        [ $? -eq 1 ] && echo "$enable_string" >> /etc/rc.conf
+        [ $? -eq 1 ] && sysrc $enable_string
 
-        if [ $fname = "minion" ] ; then
-            grep "salt_minion_paths" /etc/rc.conf >/dev/null 2>&1
-            [ $? -eq 1 ] && echo "salt_minion_paths=\"/bin:/sbin:/usr/bin:/usr/sbin:/usr/local/bin:/usr/local/sbin\"" >> /etc/rc.conf
-        fi
     done
-}
-
-install_freebsd_10_stable_post() {
-    install_freebsd_9_stable_post
-}
-
-install_freebsd_11_stable_post() {
-    install_freebsd_9_stable_post
-}
-
-install_freebsd_12_stable_post() {
-    install_freebsd_9_stable_post
 }
 
 install_freebsd_git_post() {
     if [ -f $salt_conf_file ]; then
         rm -f $salt_conf_file
     fi
-    install_freebsd_9_stable_post || return 1
+    install_freebsd_stable_post || return 1
     return 0
 }
 
